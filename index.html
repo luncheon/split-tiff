@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>split-tiff</title>
+  </head>
+  <body>
+    <h1>split-tiff</h1>
+    <input type="file" accept="image/tiff" style="cursor:pointer">
+    <ul id="download-list"></ul>
+
+    <script type="module">
+      import splitTiff from "./index.js";
+      const handleFiles = async files => {
+        const downloadList = document.getElementById("download-list");
+        for (const file of files) {
+          splitTiff(new Uint8Array(await file.arrayBuffer())).forEach((tiff, i) => {
+            const a = downloadList.appendChild(document.createElement("li")).appendChild(document.createElement("a"));
+            a.href = URL.createObjectURL(new Blob([tiff], { type: "image/tiff" }));
+            a.textContent = a.download = file.name.replace(/\.[^.]+?$/, ext => `-${i + 1}${ext}`);
+          });
+        }
+      };
+      onchange = event => {
+        const files = [...event.target.files];
+        event.target.value = null;
+        handleFiles(files);
+      };
+      ondragover = event => event.dataTransfer?.types[0] === 'Files' && event.preventDefault();
+      ondrop = event => {
+        event.preventDefault();
+        handleFiles(event.dataTransfer?.files ?? []);
+      };
+    </script>
+  </body>
+</html>
