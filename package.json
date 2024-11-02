@@ -10,10 +10,11 @@
   "types": "index.d.ts",
   "bin": "cli.js",
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p . && biome lint",
     "watch": "tsc -p . -w --preserveWatchOutput"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "typescript": "^5.6.3"
   }
 }
