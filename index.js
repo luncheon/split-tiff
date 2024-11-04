@@ -32,7 +32,7 @@ export default function* splitTiff(input) {
         let ifdValuesOver4BytesTotalByteCount = 0;
         for (let inputOffset = inputIfdOffset + 2; inputOffset < inputNextIfdOffsetOffset; inputOffset += 12) {
             const tagId = u16At(inputOffset);
-            const valuesByteCount = typeByteCounts[u16At(inputOffset + 2)] * u32At(inputOffset + 4);
+            const valuesByteCount = (tagId === 273 ? 4 : typeByteCounts[u16At(inputOffset + 2)]) * u32At(inputOffset + 4);
             if (valuesByteCount > 4) {
                 ifdValuesOver4BytesTotalByteCount += valuesByteCount;
             }
@@ -44,10 +44,10 @@ export default function* splitTiff(input) {
             }
         }
         if (inputStripOffsets?.length && stripByteCounts?.length) {
-            const outputIfdOffset = /* header */ 8 + /* image data */ stripByteCounts.reduce((x, y) => x + y, 0);
-            const output = new Uint8Array(outputIfdOffset + ifdByteCount + ifdValuesOver4BytesTotalByteCount);
+            const imageDataByteCount = stripByteCounts.reduce((x, y) => x + y, 0);
+            const output = new Uint8Array(8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount + imageDataByteCount);
             let outputCursor = 0;
-            let outputValuesOver4BytesCursor = outputIfdOffset + ifdByteCount;
+            let outputValuesOver4BytesCursor = 8 + ifdByteCount;
             const append = (uint8Array) => {
                 output.set(uint8Array, outputCursor);
                 outputCursor += uint8Array.length;
@@ -58,30 +58,35 @@ export default function* splitTiff(input) {
                 outputValuesOver4BytesCursor += uint8Array.length;
             };
             append(inputSpan(0, 4)); // byte order + magic number
-            append(to4Bytes(outputIfdOffset)); // first ifd offset
-            for (let i = 0; i < inputStripOffsets.length; i++) {
-                append(inputSpan(inputStripOffsets[i], stripByteCounts[i])); // image data
-            }
+            append(to4Bytes(8)); // first ifd offset
             append(inputSpan(inputIfdOffset, 2)); // ifd entry count
             // ifd
             for (let inputOffset = inputIfdOffset + 2; inputOffset < inputNextIfdOffsetOffset; inputOffset += 12) {
                 const tagId = u16At(inputOffset);
                 const typeByteCount = typeByteCounts[u16At(inputOffset + 2)];
                 const valuesByteCount = typeByteCount * u32At(inputOffset + 4);
-                append(inputSpan(inputOffset, 8));
                 if (tagId === 273) {
-                    const toBytes = typeByteCount === 2 ? to2Bytes : to4Bytes;
+                    append(to2Bytes(273));
+                    append(to2Bytes(4));
+                    append(to4Bytes(stripByteCounts.length));
                     const outputStripByteCounts = [];
-                    for (let i = 0, outputStripOffset = 8; i < stripByteCounts.length; outputStripOffset += stripByteCounts[i++]) {
-                        outputStripByteCounts.push(...toBytes(outputStripOffset));
+                    for (let i = 0, outputStripOffset = 8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount; i < stripByteCounts.length; outputStripOffset += stripByteCounts[i++]) {
+                        outputStripByteCounts.push(...to4Bytes(outputStripOffset));
                     }
-                    valuesByteCount > 4 ? appendValuesOver4Bytes(outputStripByteCounts) : append(outputStripByteCounts);
+                    outputStripByteCounts.length > 4 ? appendValuesOver4Bytes(outputStripByteCounts) : append(outputStripByteCounts);
+                }
+                else if (valuesByteCount > 4) {
+                    append(inputSpan(inputOffset, 8));
+                    appendValuesOver4Bytes(inputSpan(u32At(inputOffset + 8), valuesByteCount));
                 }
                 else {
-                    valuesByteCount > 4
-                        ? appendValuesOver4Bytes(inputSpan(u32At(inputOffset + 8), valuesByteCount))
-                        : append(inputSpan(inputOffset + 8, 4));
+                    append(inputSpan(inputOffset, 12));
                 }
+            }
+            // image data
+            outputCursor = 8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount;
+            for (let i = 0; i < inputStripOffsets.length; i++) {
+                append(inputSpan(inputStripOffsets[i], stripByteCounts[i])); // image data
             }
             yield output;
         }
