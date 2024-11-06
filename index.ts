@@ -26,7 +26,13 @@ export default function* splitTiff(input: Uint8Array): Generator<Uint8Array> {
     return Array.from({ length: valueCount }, (_, i) => uintAt(valueOffset + i * typeByteCount));
   };
 
+  const inputIfdOffsets = new Set<number>(); // check for circular ifd offsets to avoid infinite loop.
   while (inputIfdOffset) {
+    if (inputIfdOffsets.has(inputIfdOffset)) {
+      throw new Error("circular ifd offset.");
+    }
+    inputIfdOffsets.add(inputIfdOffset);
+
     const ifdEntryCount = u16At(inputIfdOffset);
     const ifdByteCount = /* entry count */ 2 + /* entries */ ifdEntryCount * 12 + /* next ifd offset */ 4;
     const inputNextIfdOffsetOffset = inputIfdOffset + ifdByteCount - 4;

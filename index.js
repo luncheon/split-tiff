@@ -22,7 +22,12 @@ export default function* splitTiff(input) {
         const uintAt = typeByteCount === 2 ? u16At : u32At;
         return Array.from({ length: valueCount }, (_, i) => uintAt(valueOffset + i * typeByteCount));
     };
+    const inputIfdOffsets = new Set(); // check for circular ifd offsets to avoid infinite loop.
     while (inputIfdOffset) {
+        if (inputIfdOffsets.has(inputIfdOffset)) {
+            throw new Error("circular ifd offset.");
+        }
+        inputIfdOffsets.add(inputIfdOffset);
         const ifdEntryCount = u16At(inputIfdOffset);
         const ifdByteCount = /* entry count */ 2 + /* entries */ ifdEntryCount * 12 + /* next ifd offset */ 4;
         const inputNextIfdOffsetOffset = inputIfdOffset + ifdByteCount - 4;
