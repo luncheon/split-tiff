@@ -1,14 +1,18 @@
-const typeByteCounts = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8] as const;
+const typeByteCounts = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4] as const;
 
-export default function* splitTiff(input: Uint8Array): Generator<Uint8Array> {
+export interface SplitTiffOptions {
+  readonly subIfds?: boolean;
+}
+
+export default function* splitTiff(input: Uint8Array, options?: SplitTiffOptions): Generator<Uint8Array> {
   const littleEndian = input[0] === 73; // I
   const inputDataView = new DataView(input.buffer);
   const u16At = (byteOffset: number): number => inputDataView.getUint16(byteOffset, littleEndian);
   const u32At = (byteOffset: number): number => inputDataView.getUint32(byteOffset, littleEndian);
-  let inputIfdOffset = u32At(4);
+  const firstInputIfdOffset = u32At(4);
 
   // single image
-  if (!u32At(inputIfdOffset + 2 + u16At(inputIfdOffset) * 12)) {
+  if (!u32At(firstInputIfdOffset + 2 + u16At(firstInputIfdOffset) * 12)) {
     yield input;
     return;
   }
@@ -26,37 +30,54 @@ export default function* splitTiff(input: Uint8Array): Generator<Uint8Array> {
     return Array.from({ length: valueCount }, (_, i) => uintAt(valueOffset + i * typeByteCount));
   };
 
-  const inputIfdOffsets = new Set<number>(); // check for circular ifd offsets to avoid infinite loop.
-  while (inputIfdOffset) {
-    if (inputIfdOffsets.has(inputIfdOffset)) {
-      throw new Error("circular ifd offset.");
+  const remainingInputIfdOffsets = [firstInputIfdOffset];
+  const processedInputIfdOffsets = new Set<number>(); // check for circular ifd offsets to avoid infinite loop.
+  for (let inputIfdOffset: number | undefined; (inputIfdOffset = remainingInputIfdOffsets.shift()); ) {
+    if (processedInputIfdOffsets.has(inputIfdOffset)) {
+      console.warn("split-tiff: circular ifd offset.");
+      continue;
     }
-    inputIfdOffsets.add(inputIfdOffset);
+    processedInputIfdOffsets.add(inputIfdOffset);
 
     const ifdEntryCount = u16At(inputIfdOffset);
     const ifdByteCount = /* entry count */ 2 + /* entries */ ifdEntryCount * 12 + /* next ifd offset */ 4;
     const inputNextIfdOffsetOffset = inputIfdOffset + ifdByteCount - 4;
 
-    // seek image areas, count bytes of values over 4 bytes
-    let inputStripOffsets: number[] | undefined;
-    let stripByteCounts: number[] | undefined;
+    // collect SubIFDs (330), (StripOffsets (273) and StripByteCounts (279)) or (TileOffsets (324) and TileByteCounts(325))
+    // count bytes of values over 4 bytes
+    const inputTags: { [TagId in 273 | 279 | 324 | 325]?: number[] } = {};
     let ifdValuesOver4BytesTotalByteCount = 0;
     for (let inputOffset = inputIfdOffset + 2; inputOffset < inputNextIfdOffsetOffset; inputOffset += 12) {
       const tagId = u16At(inputOffset);
       const valuesByteCount = (tagId === 273 ? 4 : typeByteCounts[u16At(inputOffset + 2)]) * u32At(inputOffset + 4);
-      if (valuesByteCount > 4) {
-        ifdValuesOver4BytesTotalByteCount += valuesByteCount;
-      }
-      if (tagId === 273) {
-        inputStripOffsets = getIfdUintValues(inputOffset);
-      } else if (tagId === 279) {
-        stripByteCounts = getIfdUintValues(inputOffset);
+      if (tagId === 254 || tagId === 255) {
+        // ignore NewSubfileType or SubfileType
+      } else if (tagId === 330) {
+        options?.subIfds && remainingInputIfdOffsets.push(...getIfdUintValues(inputOffset));
+      } else {
+        if (valuesByteCount > 4) {
+          ifdValuesOver4BytesTotalByteCount += valuesByteCount;
+        }
+        if (tagId === 273 || tagId === 279 || tagId === 324 || tagId === 325) {
+          inputTags[tagId] = getIfdUintValues(inputOffset);
+        }
       }
     }
 
-    if (inputStripOffsets?.length && stripByteCounts?.length) {
-      const imageDataByteCount = stripByteCounts.reduce((x, y) => x + y, 0);
-      const output = new Uint8Array(8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount + imageDataByteCount);
+    const { 273: stripOffsets, 279: stripByteCounts, 324: tileOffsets, 325: tileByteCounts } = inputTags;
+    if (stripOffsets?.length !== stripByteCounts?.length) {
+      console.warn("split-tiff: StripOffsets and StripByteCounts are different lengths.");
+      continue;
+    }
+    if (tileOffsets?.length !== tileByteCounts?.length) {
+      console.warn("split-tiff: TileOffsets and TileByteCounts are different lengths.");
+      continue;
+    }
+
+    if (stripByteCounts?.length || tileByteCounts?.length) {
+      const totalStripByteCount = stripByteCounts?.reduce((x, y) => x + y, 0) ?? 0;
+      const totalTileByteCount = tileByteCounts?.reduce((x, y) => x + y, 0) ?? 0;
+      const output = new Uint8Array(8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount + totalStripByteCount + totalTileByteCount);
 
       let outputCursor = 0;
       let outputValuesOver4BytesCursor = 8 + ifdByteCount;
@@ -78,19 +99,20 @@ export default function* splitTiff(input: Uint8Array): Generator<Uint8Array> {
         const tagId = u16At(inputOffset);
         const typeByteCount = typeByteCounts[u16At(inputOffset + 2)]!;
         const valuesByteCount = typeByteCount * u32At(inputOffset + 4);
-        if (tagId === 273) {
-          append(to2Bytes(273));
-          append(to2Bytes(4));
-          append(to4Bytes(stripByteCounts.length));
-          const outputStripByteCounts: number[] = [];
-          for (
-            let i = 0, outputStripOffset = 8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount;
-            i < stripByteCounts.length;
-            outputStripOffset += stripByteCounts[i++]
-          ) {
-            outputStripByteCounts.push(...to4Bytes(outputStripOffset));
+        if (tagId === 254 || tagId === 255 || tagId === 330) {
+          // NewSubfileType, SubfileType or SubIFDs
+        } else if (tagId === 273 || tagId === 324) {
+          const imageByteCounts = inputTags[tagId === 273 ? 279 : 325] ?? [];
+          const outputImageOffsets: number[] = [];
+          let outputImageOffset = 8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount + (tagId === 324 ? totalStripByteCount : 0);
+          for (const imageDataCount of imageByteCounts) {
+            outputImageOffsets.push(...to4Bytes(outputImageOffset));
+            outputImageOffset += imageDataCount;
           }
-          outputStripByteCounts.length > 4 ? appendValuesOver4Bytes(outputStripByteCounts) : append(outputStripByteCounts);
+          append(to2Bytes(tagId));
+          append(to2Bytes(4));
+          append(to4Bytes(imageByteCounts.length));
+          outputImageOffsets.length > 4 ? appendValuesOver4Bytes(outputImageOffsets) : append(outputImageOffsets);
         } else if (valuesByteCount > 4) {
           append(inputSpan(inputOffset, 8));
           appendValuesOver4Bytes(inputSpan(u32At(inputOffset + 8), valuesByteCount));
@@ -100,11 +122,20 @@ export default function* splitTiff(input: Uint8Array): Generator<Uint8Array> {
       }
       // image data
       outputCursor = 8 + ifdByteCount + ifdValuesOver4BytesTotalByteCount;
-      for (let i = 0; i < inputStripOffsets.length; i++) {
-        append(inputSpan(inputStripOffsets[i], stripByteCounts[i])); // image data
+      if (stripOffsets && stripByteCounts) {
+        for (let i = 0; i < stripByteCounts.length; i++) {
+          append(inputSpan(stripOffsets[i], stripByteCounts[i]));
+        }
+      }
+      if (tileOffsets && tileByteCounts) {
+        for (let i = 0; i < tileByteCounts.length; i++) {
+          append(inputSpan(tileOffsets[i], tileByteCounts[i]));
+        }
       }
       yield output;
     }
-    inputIfdOffset = u32At(inputNextIfdOffsetOffset);
+
+    const inputNextIfdOffset = u32At(inputNextIfdOffsetOffset);
+    inputNextIfdOffset && remainingInputIfdOffsets.push(inputNextIfdOffset);
   }
 }

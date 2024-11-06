@@ -9,11 +9,14 @@
   },
   "linter": {
     "rules": {
+      "nursery": {
+        "useExplicitType": "error"
+      },
       "style": {
         "noNonNullAssertion": "off"
       },
-      "nursery": {
-        "useExplicitType": "error"
+      "suspicious": {
+        "noAssignInExpressions": "off"
       }
     }
   },
